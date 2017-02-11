@@ -7,24 +7,154 @@ output: html_document
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(cache=TRUE)
+
 ```
 
-## R Markdown
+## Introduction
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+This paper was produced as the final assignment of Coursera's Practical
+Machine Learning course from the Data Science Specialization by Johns Hopkins University. For more information visit <a href="https://www.coursera.org/specializations/jhu-data-science">Data Science Specialization</a>.
 
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+The scripts in this paper can be found <a href="https://github.com/pedromb/practicalmachinelearning">here</a>.
 
-```{r cars}
-summary(cars)
+## Background
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website [here](http://groupware.les.inf.puc-rio.br/har) (see the section on the Weight Lifting Exercise Dataset). 
+
+The goal of this paper is to predict the manner in which the participants did the exercise. This is the "classe" variable in the training set.
+
+## Data
+
+First we load the libraries we will be using and the dataset.
+
+``` {r}
+library(ggplot2)
+library(lattice)
+library(caret)
+library(xgboost)
+library(plyr)
+
+set.seed(125)
+
+trainUrl <- "http://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+testUrl <- "http://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+
+
+trainData <- read.csv(url(trainUrl), na.strings=c("NA","#DIV/0!",""))
+testData <- read.csv(url(testUrl), na.strings=c("NA","#DIV/0!",""))
 ```
 
-## Including Plots
+Looking at the train set we can see that a lot of the features have NAs in most of the rows. So we will drop the columns that have more than 70% of the rows filled with NAs, since these features will not give us any new information. Also, we will drop the feature 'cvtd_timestamp', since is just another way of representing the feature 'raw_timestamp_part_1'. The first column is just the index, so this will also be dropped.
 
-You can also embed plots, for example:
-
-```{r pressure, echo=FALSE}
-plot(pressure)
+``` {r}
+thresholdNas <- as.integer(.7*nrow(trainData))
+trainData$X <- NULL
+trainData$cvtd_timestamp <- NULL
+trainData <- trainData[, !colSums(is.na(trainData)) > thresholdNas]
+testData <- testData[, which(names(testData) %in% names(trainData))]
+trainLabels <- trainData$classe
+trainData$classe <- NULL
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+Note that we dropped the same columns in the test set. Another thing that we did was store the classes on a variable and dropped it from the original set, the reason for that will be explained later.
+
+## XGBoost
+
+To build our model we will use the package <a href="https://cran.r-project.org/web/packages/xgboost/xgboost.pdf">XGBoost</a>. This is a famous implementation of the gradient boosting frame. It is widely used amongst the community, and usually yields great results.
+
+We will also use the <a href="https://cran.r-project.org/web/packages/caret/vignettes/caret.pdf"> caret </a> package to help us with model selection.
+
+To be able to use the XGBoost package we will convert our data to matrixes, we would also need to separate the class labels from the original dataset, what has already been done.
+
+``` {r}
+trainMatrix <- data.matrix(trainData)
+testMatrix <- data.matrix(testData)
+```
+
+## Model Selection
+
+For model selection we will run a grid search to tune the parameters for the XGBoost model. The best parameters will be chosen according to their average performance in a 10-fold cross-validation.
+
+``` {r}
+## Model selection using CV
+
+##Search Grid
+xgb_grid = expand.grid(
+  nrounds = 200,
+  eta = c(0.3,0.1,0.05,0.03),  
+  max_depth = c(4,6,8,10)
+)
+
+##Train Control
+xgb_train_control <- trainControl(
+  method = "cv",
+  number = 10,
+  verboseIter = FALSE,
+  returnData = FALSE,
+  returnResamp = "all",                                                      
+  classProbs = TRUE,    
+  allowParallel = TRUE
+)
+
+xgb_train <- train(
+  x=trainMatrix,
+  y=trainLabels,
+  trControl = xgb_train_control,
+  tuneGrid = xgb_grid,
+  method = "xgbTree"
+)
+```
+
+## Results
+
+We can see the results for the cross-validation process.
+
+``` {r}
+plot(xgb_train)
+```
+
+The best parameters were the following.
+
+```{r}
+print(xgb_train$bestTune)
+```
+
+With the trained model we can predict on the 20 test cases.
+
+```{r}
+transformNumberIntoClass <- function(x) {
+  if(x==1) 'A'
+  else if(x==2) 'B'
+  else if(x==3) 'C'
+  else if(x==4) 'D'
+  else if(x==5) 'E'
+}
+xgbFit <- xgb_train$finalModel
+predictions <- predict(xgbFit, testMatrix)
+predictionsMatrix <- matrix(predictions, nrow=nrow(testMatrix), ncol=5, byrow=T)
+finalPredictions <- apply(predictionsMatrix, 1, function(x) which(x==max(x)))
+dfPredictions <- data.frame(TestCase=1:20, 
+                            Class= unlist(lapply(finalPredictions, transformNumberIntoClass)))
+print(dfPredictions)
+```
+
+We can also look at the results from the cross-validation process to check the expected out of sample error.
+
+```{r}
+bestResult <-  subset(xgb_train$results, xgb_train$results$Accuracy==max(xgb_train$results$Accuracy))
+
+print(bestResult)
+```
+
+## Conclusion
+
+The results from the submission for the 20 test cases gave us 100% accuracy. Also, we can notice that the expected out of sample error is quite low, less than .3%, showing that our model had a great result.
+
+Without using the caret package to tune the parameters for the XGBoost model is possible to tune a number of other different parameters, this can, possible, create an even better model. But, for the objectives of this paper the results found were really satisfactory.
+
+## Reference
+
+Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.
+
+Read more: http://groupware.les.inf.puc-rio.br/har#ixzz4YPx9mZqG
